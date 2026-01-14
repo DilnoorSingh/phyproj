@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Advanced Escape Velocity Simulator</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root { --accent: #4cc9f0; --bg: #0b0d17; --panel: #161b22; }
+        body { margin: 0; padding: 20px; font-family: 'Inter', sans-serif; background: var(--bg); color: #e0e0e0; }
+        h1 { text-align: center; color: var(--accent); margin-bottom: 20px; }
+        
+        .main-layout { display: grid; grid-template-columns: 320px 1fr 350px; gap: 20px; max-width: 1400px; margin: 0 auto; }
+        
+        .panel { background: var(--panel); padding: 20px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.4); }
+        
+        /* Controls */
+        .control-group { margin-bottom: 18px; }
+        label { display: block; font-size: 0.85rem; color: #a3b1bc; margin-bottom: 8px; }
+        input[type="range"] { width: 100%; }
+        
+        /* Stats & Economics */
+        .eco-box { background: #0d1117; padding: 15px; border-radius: 8px; border-left: 4px solid #f72585; margin-top: 15px; }
+        .eco-box p { margin: 5px 0; font-family: 'Courier New', monospace; font-size: 0.9rem; }
+        .price-tag { color: #4ade80; font-weight: bold; font-size: 1.1rem; }
+
+        /* Canvases */
+        canvas#simCanvas { background: #000; border-radius: 8px; width: 100%; height: 500px; }
+        .graph-container { height: 230px; margin-bottom: 10px; }
+
+        button { width: 100%; padding: 12px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; transition: 0.2s; margin-bottom: 10px; }
+        #launchBtn { background: var(--accent); color: #000; }
+        #launchBtn:hover { background: #3fa8cc; }
+        #resetBtn { background: #30363d; color: white; }
+    </style>
+</head>
+<body>
+
+    <h1>Escape Velocity & Economics Simulation</h1>
+
+    <div class="main-layout">
+        <div class="panel">
+            <div class="control-group">
+                <label>Planet Mass ($M$): <b id="mVal">5000</b></label>
+                <input type="range" id="mass" min="1000" max="20000" value="5000">
+            </div>
+            <div class="control-group">
+                <label>Planet Radius ($R$): <b id="rVal">50</b></label>
+                <input type="range" id="radius" min="20" max="120" value="50">
+            </div>
+            <div class="control-group">
+                <label>Launch Velocity ($v_0$): <b id="vVal">12</b></label>
+                <input type="range" id="velocity" min="1" max="30" step="0.5" value="12">
+            </div>
+
+            <hr style="border:0; border-top:1px solid #30363d; margin: 20px 0;">
+
+            <div class="eco-box">
+                <p>Calculated $v_e$: <span id="evDisplay" style="color:var(--accent)">0.0</span></p>
+                <p>Fuel Required: <span id="fuelDisplay">0</span> kg</p>
+                <p>Mission Cost: <span id="costDisplay" class="price-tag">$0.00</span></p>
+            </div>
+            <br>
+            <button id="launchBtn">IGNITION & LAUNCH</button>
+            <button id="resetBtn">RESET SIMULATION</button>
+        </div>
+
+        <div class="panel" style="padding:10px;">
+            <canvas id="simCanvas"></canvas>
+            <p style="text-align:center; font-size:0.8rem; color:#666;">View: Planetary Interaction (2D Orbit Mechanics)</p>
+        </div>
+
+        <div class="panel">
+            <h3 style="margin-top:0; font-size:1rem;">Live Telemetry</h3>
+            <div class="graph-container">
+                <canvas id="velGraph"></canvas>
+            </div>
+            <div class="graph-container">
+                <canvas id="altGraph"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('simCanvas');
+        const ctx = canvas.getContext('2d');
+        const massInp = document.getElementById('mass');
+        const radInp = document.getElementById('radius');
+        const velInp = document.getElementById('velocity');
+
+        // Physics Constants
+        const G = 0.1; 
+        const FUEL_PRICE_PER_KG = 2.50; // 2026 average cost
+        const PROJECTILE_DRY_MASS = 100; // kg
+
+        let planet = { x: 0, y: 0, mass: 5000, radius: 50 };
+        let projectile = { x: 0, y: 0, vx: 0, vy: 0, active: false, data: [] };
+        let animationId;
+
+        // Chart Initialization
+        const chartOptions = {
+            responsive: true, maintainAspectRatio: false,
+            scales: { x: { display: false }, y: { ticks: { color: '#888' }, grid: { color: '#222' } } },
+            plugins: { legend: { display: false } },
+            animation: false
+        };
+
+        const velChart = new Chart(document.getElementById('velGraph'), {
+            type: 'line',
+            data: { labels: [], datasets: [{ label: 'Velocity', data: [], borderColor: '#4cc9f0', borderWidth: 2, pointRadius: 0 }] },
+            options: { ...chartOptions, plugins: { title: { display: true, text: 'Velocity vs Time', color: '#eee' } } }
+        });
+
+        const altChart = new Chart(document.getElementById('altGraph'), {
+            type: 'line',
+            data: { labels: [], datasets: [{ label: 'Altitude', data: [], borderColor: '#f72585', borderWidth: 2, pointRadius: 0 }] },
+            options: { ...chartOptions, plugins: { title: { display: true, text: 'Altitude vs Time', color: '#eee' } } }
+        });
+
+        function updateEconomics() {
+            const v0 = parseFloat(velInp.value);
+            const ve = Math.sqrt((2 * G * planet.mass) / planet.radius);
+            
+            // Simplified Rocket Equation: m_fuel = m_dry * (e^(v/ve_exhaust) - 1)
+            // Using 15 as an arbitrary specific exhaust velocity for the sim
+            const fuelKg = PROJECTILE_DRY_MASS * (Math.exp(v0 / 12) - 1);
+            const cost = fuelKg * FUEL_PRICE_PER_KG;
+
+            document.getElementById('mVal').innerText = massInp.value;
+            document.getElementById('rVal').innerText = radInp.value;
+            document.getElementById('vVal').innerText = v0;
+            document.getElementById('evDisplay').innerText = ve.toFixed(2);
+            document.getElementById('fuelDisplay').innerText = Math.round(fuelKg).toLocaleString();
+            document.getElementById('costDisplay').innerText = "$" + cost.toLocaleString(undefined, {minimumFractionDigits: 2});
+            
+            planet.mass = parseFloat(massInp.value);
+            planet.radius = parseFloat(radInp.value);
+            if(!projectile.active) draw();
+        }
+
+        function draw() {
+            canvas.width = canvas.offsetWidth;
+            canvas.height = canvas.offsetHeight;
+            planet.x = canvas.width / 2;
+            planet.y = canvas.height / 2;
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // Draw Planet
+            ctx.beginPath();
+            ctx.arc(planet.x, planet.y, planet.radius, 0, Math.PI * 2);
+            ctx.fillStyle = '#4361ee';
+            ctx.fill();
+            ctx.strokeStyle = '#4cc9f0';
+            ctx.stroke();
+
+            // Draw Projectile
+            if (projectile.active) {
+                ctx.beginPath();
+                ctx.arc(projectile.x, projectile.y, 4, 0, Math.PI * 2);
+                ctx.fillStyle = '#f72585';
+                ctx.fill();
+            } else {
+                ctx.beginPath();
+                ctx.arc(planet.x, planet.y - planet.radius - 5, 4, 0, Math.PI * 2);
+                ctx.fillStyle = '#f72585';
+                ctx.fill();
+            }
+        }
+
+        function launch() {
+            if (projectile.active) return;
+            resetCharts();
+            projectile.x = planet.x;
+            projectile.y = planet.y - planet.radius - 5;
+            projectile.vx = parseFloat(velInp.value);
+            projectile.vy = 0;
+            projectile.active = true;
+            animate();
+        }
+
+        function animate() {
+            if (!projectile.active) return;
+
+            const dx = planet.x - projectile.x;
+            const dy = planet.y - projectile.y;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            
+            // Gravity Logic
+            const force = (G * planet.mass) / (dist * dist);
+            projectile.vx += (dx / dist) * force;
+            projectile.vy += (dy / dist) * force;
+            
+            projectile.x += projectile.vx;
+            projectile.y += projectile.vy;
+
+            const currentVel = Math.sqrt(projectile.vx**2 + projectile.vy**2);
+            const altitude = dist - planet.radius;
+
+            updateCharts(currentVel, altitude);
+
+            if (dist < planet.radius || dist > 2000) {
+                projectile.active = false;
+                cancelAnimationFrame(animationId);
+            }
+
+            draw();
+            animationId = requestAnimationFrame(animate);
+        }
+
+        function updateCharts(v, a) {
+            velChart.data.labels.push("");
+            velChart.data.datasets[0].data.push(v);
+            altChart.data.labels.push("");
+            altChart.data.datasets[0].data.push(a);
+            
+            if(velChart.data.labels.length > 50) {
+                velChart.data.labels.shift();
+                velChart.data.datasets[0].data.shift();
+                altChart.data.labels.shift();
+                altChart.data.datasets[0].data.shift();
+            }
+            velChart.update();
+            altChart.update();
+        }
+
+        function resetCharts() {
+            velChart.data.labels = [];
+            velChart.data.datasets[0].data = [];
+            altChart.data.labels = [];
+            altChart.data.datasets[0].data = [];
+            velChart.update();
+            altChart.update();
+        }
+
+        [massInp, radInp, velInp].forEach(el => el.addEventListener('input', updateEconomics));
+        document.getElementById('launchBtn').addEventListener('click', launch);
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            projectile.active = false;
+            resetCharts();
+            draw();
+        });
+
+        window.onload = updateEconomics;
+    </script>
+</body>
+</html>
